@@ -420,6 +420,159 @@ echo "$target"
     }
   }
 
+  // ---------------------------------------------------------------- designer
+  //
+  // The visual designer writes ordinary designs into the same folder; a
+  // layout comment at the top is what tells it apart, and is what lets the
+  // designer open one again. Explorer.qml owns the editing, the service owns
+  // the files.
+
+  signal designerDesignCreated(string id, string path)
+
+  // Makes the file and hands its path back, so the explorer can drop straight
+  // into the designer on it.
+  function createDesignerDesign(content) {
+    if (designerCreateProc.running) return false
+    designerCreateProc.command = ["bash", "-c", designerCreateScript, "newdesign", userDesignsDir, String(content)]
+    designerCreateProc.running = true
+    return true
+  }
+
+  readonly property string designerCreateScript: '
+set -e
+dir="$1"; content="$2"
+mkdir -p "$dir"
+target="$dir/MyLayout.qml"; n=2
+while [[ -e $target ]]; do target="$dir/MyLayout$n.qml"; n=$((n+1)); done
+printf %s "$content" > "$target"
+echo "$target"
+'
+
+  Process {
+    id: designerCreateProc
+    stdout: StdioCollector {
+      id: designerCreateOut
+      waitForEnd: true
+      onStreamFinished: {
+        var target = String(designerCreateOut.text || "").trim()
+        if (target.length === 0) return
+        var d = Designs.fromUserFile(target)
+        d.designer = true
+        Designs.setUser(Designs.USER.concat([d]))
+        root.designsRevision += 1
+        root.designerDesignCreated(d.id, target)
+        root.rescanUserDesigns()
+        root.logEvent("designer-design=" + d.id)
+      }
+    }
+  }
+
+  // -------------------------------------------------------------- components
+  //
+  // Pieces saved out of the designer, so they can be dropped into any design
+  // later. One JSON file each in ~/.config/omarchy/lock-components, written
+  // on a single line; the scan below reads them all in one go.
+
+  readonly property string componentsDir: home + "/.config/omarchy/lock-components"
+  property var components: []
+
+  function rescanComponents() {
+    if (!componentsProc.running) componentsProc.running = true
+  }
+
+  function saveComponent(slug, json) {
+    var safe = String(slug || "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+    if (safe.length === 0 || String(json || "").length === 0) return false
+    if (componentSaveProc.running) return false
+    componentSaveProc.command = ["bash", "-c",
+      'mkdir -p "$1" && printf %s "$3" > "$1/$2.json"', "savecomponent", componentsDir, safe, String(json)]
+    componentSaveProc.running = true
+    logEvent("component-saved=" + safe)
+    return true
+  }
+
+  function deleteComponent(slug) {
+    var safe = String(slug || "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+    if (safe.length === 0) return false
+    if (componentDeleteProc.running) return false
+    componentDeleteProc.command = ["bash", "-c",
+      'rm -f -- "$1/$2.json"', "delcomponent", componentsDir, safe]
+    componentDeleteProc.running = true
+    logEvent("component-deleted=" + safe)
+    return true
+  }
+
+  Process {
+    id: componentsProc
+    running: true
+    // slug<TAB>json, one component per line. The files the designer writes
+    // have no newlines in them; tr keeps a hand-edited one from splitting the
+    // listing across lines.
+    command: ["bash", "-c",
+      'dir="$1"; mkdir -p "$dir"; for f in "$dir"/*.json; do [ -e "$f" ] || continue; printf "%s\\t" "$(basename "$f" .json)"; tr -d "\\n" < "$f"; printf "\\n"; done',
+      "components", root.componentsDir]
+    stdout: StdioCollector {
+      id: componentsOut
+      waitForEnd: true
+      onStreamFinished: {
+        var lines = String(componentsOut.text || "").split("\n")
+        var list = []
+        for (var i = 0; i < lines.length; i++) {
+          var tab = lines[i].indexOf("\t")
+          if (tab === -1) continue
+          var slug = lines[i].substring(0, tab).trim()
+          try {
+            var comp = JSON.parse(lines[i].substring(tab + 1))
+            if (comp && comp.nodes instanceof Array) list.push({ slug: slug, comp: comp })
+          } catch (e) {
+            console.warn("lock-explorer: cannot read component", slug, e)
+          }
+        }
+        list.sort(function(a, b) { return String(a.comp.name).localeCompare(String(b.comp.name)) })
+        if (JSON.stringify(list) === JSON.stringify(root.components)) return
+        root.components = list
+      }
+    }
+  }
+
+  Process {
+    id: componentSaveProc
+    onExited: root.rescanComponents()
+  }
+
+  Process {
+    id: componentDeleteProc
+    onExited: root.rescanComponents()
+  }
+
+  // The file dialog again, for the designer's Image piece. Same dance as the
+  // avatar: the explorer steps aside while it is up.
+  signal imagePicked(string path)
+  property bool imagePickReopens: false
+
+  function pickImage(reopenExplorer) {
+    if (imagePickProc.running) return false
+    imagePickReopens = reopenExplorer === true
+    imagePickProc.running = true
+    return true
+  }
+
+  Process {
+    id: imagePickProc
+    command: ["omarchy-file-select", "--title", "Pick an image for the design", "--extensions", "png jpg jpeg webp svg"]
+    stdout: StdioCollector {
+      id: imagePickOut
+      waitForEnd: true
+      onStreamFinished: {
+        var picked = String(imagePickOut.text || "").trim().split("\n")[0] || ""
+        if (picked.length > 0) root.imagePicked(picked)
+        if (root.imagePickReopens && root.shell && typeof root.shell.summon === "function")
+          root.shell.summon(root.pluginId, "{}")
+        root.imagePickReopens = false
+      }
+    }
+  }
+
   // ------------------------------------------------------------------ avatar
 
   function setAvatar(path) {
@@ -1874,7 +2027,7 @@ echo "$out"
     // Files built on ClipDesign are tagged (with their clip file when it is
     // named inline) so they keep their animation flag and their video across
     // rescans.
-    command: ["bash", "-c", "for f in \"$0\"/*.qml; do [ -e \"$f\" ] || continue; c=$(grep -o 'clipName: \"[^\"]*\"' \"$f\" 2>/dev/null | head -1 | cut -d'\"' -f2); if [ -n \"$c\" ]; then printf '%s\\tclip\\t%s\\n' \"$f\" \"$c\"; elif grep -q ClipDesign \"$f\" 2>/dev/null; then printf '%s\\tclip\\n' \"$f\"; else printf '%s\\n' \"$f\"; fi; done", root.userDesignsDir]
+    command: ["bash", "-c", "for f in \"$0\"/*.qml; do [ -e \"$f\" ] || continue; c=$(grep -o 'clipName: \"[^\"]*\"' \"$f\" 2>/dev/null | head -1 | cut -d'\"' -f2); if [ -n \"$c\" ]; then printf '%s\\tclip\\t%s\\n' \"$f\" \"$c\"; elif grep -q ClipDesign \"$f\" 2>/dev/null; then printf '%s\\tclip\\n' \"$f\"; elif grep -q '// designer:1:' \"$f\" 2>/dev/null; then printf '%s\\tdesigner\\n' \"$f\"; else printf '%s\\n' \"$f\"; fi; done", root.userDesignsDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1883,6 +2036,11 @@ echo "$out"
           var parts = l.split("\t")
           var d = Designs.fromUserFile(parts[0].trim())
           if (parts.length > 1 && parts[1].trim() === "clip") { d.anim = true; d.clip = true }
+          // Made in the designer: E opens it there instead of in the code editor.
+          if (parts.length > 1 && parts[1].trim() === "designer") {
+            d.designer = true
+            d.description = "Made in the designer"
+          }
           if (parts.length > 2 && parts[2].trim().length > 0) d.clipFile = parts[2].trim()
           return d
         })
@@ -2274,6 +2432,17 @@ echo "$out"
     function rescanDesigns(): string {
       root.rescanUserDesigns()
       return "ok"
+    }
+
+    function rescanComponents(): string {
+      root.rescanComponents()
+      return "ok"
+    }
+
+    function components(): string {
+      var names = []
+      for (var i = 0; i < root.components.length; i++) names.push(root.components[i].comp.name)
+      return names.length > 0 ? names.join("\n") : "none"
     }
 
     function avatar(): string {
