@@ -5,7 +5,7 @@
   "version": "1.6.0",
   "author": "SirJul1337",
   "license": "MIT",
-  "description": "Lock screen designs for Omarchy with a picker to preview and switch between them",
+  "description": "Lock screen designs for Omarchy, a picker to preview and switch between them, and a designer for building your own",
   "kinds": [
     "service",
     "overlay"
