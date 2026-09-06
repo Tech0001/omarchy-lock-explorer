@@ -39,8 +39,11 @@ dialog is up and comes back when you are done), `Shift+A` clears it again. The d
 the user — Greeting Card, Split, Dock, Poster, Sheet, Island and Profile — use it, and fall back
 to your initial when there is none.
 
-`C` on any design copies it to `~/.config/omarchy/lock-designs/` (it shows up under Custom) and opens it in the
-built-in editor. `E` edits a custom design, `N` starts a new one from the template. `X` (or the
+`D` opens the visual designer — a new design, or the selected one if it was made there (see
+[The designer](#the-designer)). `C` on any design copies it to `~/.config/omarchy/lock-designs/`
+(it shows up under Custom) and opens it in the built-in code editor. `E` edits a design of your
+own, in the designer or the code editor depending on where it came from. `N` starts a new one
+from the template. `X` (or the
 Delete button on the card) removes a design of your own — press it twice, the first press just
 arms the button. Deleting a clip design also removes its video from `~/.config/omarchy/lock-videos/`
 unless something else still uses it (another design, the boot screen, the Motion video or the
@@ -153,6 +156,56 @@ extras/boot-vm-test.sh "$(plymouth/apply.sh terminal --stage-only)"
 
 boots your real kernel and initramfs in QEMU against a throwaway encrypted disk (passphrase:
 `omarchy`). Needs `qemu-system-x86`, `edk2-ovmf` and `qemu-ui-gtk`.
+
+## The designer
+
+"+ New design" in the explorer sidebar (or `D`) opens the visual designer: pieces on the left,
+your lock screen at its real size in the middle, the settings for whatever is selected on the
+right. Drag a piece onto the screen — or click it to drop one in the middle — move it around,
+and press Ctrl+S. There is no separate preview: the canvas renders through the same components
+the lock screen does, so what you arrange is what you get.
+
+What you can drag in: **Wallpaper**, **Video** and **Solid color** for the background; **Clock**,
+**Date**, **Greeting**, **Text**, **User name**, **Host name** and a **Status line** that turns
+into the failure message when a password is wrong; a **Password box** or bare **Dots** to type
+into; **Avatar** and **Image**; **Panel** and **Divider** to build a card out of; and **Custom
+QML** for anything else — that one is a box you write QML into, with `lock.now`, `lock.userName`,
+`lock.greeting()` and the rest in scope, exactly as in a hand-written design.
+
+Nothing is parked at fixed pixel coordinates. Every piece holds on to a corner, an edge or the
+middle of the screen ("Sticks to" in the inspector, picked from where you drop it) and keeps its
+distance from there, so a design made on one screen still looks right on another. Dragging snaps
+to the screen's centre lines and to the other pieces' edges, and arrow keys nudge by a pixel
+(Shift for ten).
+
+```
+drag / click a piece   add it            Ctrl+click       add to the selection
+arrows                 nudge (Shift 10)  Ctrl+D           duplicate
+Del                    remove            [ and ]          send back / bring forward
+Ctrl+Z / Ctrl+Shift+Z  undo / redo       Ctrl+S           save
+```
+
+### Your own components
+
+Select a piece — or several with Ctrl — press **Save as component** and give it a name. It goes
+into `~/.config/omarchy/lock-components/` as one small JSON file and shows up at the top of the
+palette, previewed live, ready to drag into any design from then on. A component keeps the
+relative positions of everything in it, so a card built out of a panel, an avatar and a greeting
+comes back as that card. Backgrounds are not saved into components — they cover the whole screen,
+so there is nothing to place. The `✕` on a component removes it.
+
+Because a component is just a piece of a layout, a Custom QML piece can be saved as one too:
+write the QML once, name it, and it becomes a block you drag in like any other.
+
+### What it writes
+
+The designer saves an ordinary design into `~/.config/omarchy/lock-designs/`, so it appears under
+Custom next to everything else and can be applied, previewed and deleted the same way. The file is
+a `DesignBase` with one `DesignerItem` per piece, and the layout itself sits on a single comment
+line at the top — that line is what the designer reads when you open the design again. **Edit the
+code by hand and the next save from the designer overwrites it**, so pick one: "Edit code" in the
+designer toolbar moves a design over to the code editor for good, and `E` on a design opens it
+wherever it was made.
 
 ## Your own designs
 

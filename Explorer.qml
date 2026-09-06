@@ -6,6 +6,7 @@ import qs.Commons
 import qs.Ui
 import "designs"
 import "Designs.js" as Designs
+import "Designer.js" as Layout
 
 Item {
   id: root
@@ -52,6 +53,12 @@ Item {
   property bool fullPreview: false
   property bool editing: false
   property var editingDesign: null
+  // The visual designer, which takes over the card the same way the code
+  // editor does. `designerPaused` holds the session open across the file
+  // dialog, which needs the explorer to step aside.
+  property bool designing: false
+  property var designingDesign: null
+  property bool designerPaused: false
   property string category: "all"
 
   readonly property var categories: Designs.categories()
@@ -101,6 +108,7 @@ Item {
 
   function handleEscape() {
     if (confirmingDelete.length > 0) { confirmingDelete = ""; return }
+    if (designing) { designerView.requestClose(); return }
     if (editing) { closeEditor(); return }
     if (bootEditing.length > 0) { closeBootEditor(); return }
     if (fullPreview) { fullPreview = false; return }
@@ -574,6 +582,14 @@ Item {
   function open(payloadJson) {
     root.opened = true
     root.fullPreview = false
+    // Back from the file dialog: drop straight into the design that was open.
+    if (root.designerPaused) {
+      root.designerPaused = false
+      root.requestedTab = ""
+      if (root.service && typeof root.service.rescanUserDesigns === "function") root.service.rescanUserDesigns()
+      Qt.callLater(function() { designerView.focusCanvas() })
+      return
+    }
     root.mainTab = root.requestedTab.length > 0 ? root.requestedTab : "styling"
     root.requestedTab = ""
     root.category = "all"
@@ -602,9 +618,15 @@ Item {
   function dismiss() {
     root.opened = false
     root.fullPreview = false
+    if (root.designerPaused) {
+      if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
+      return
+    }
     root.mainTab = "styling"
     root.editing = false
     root.editingDesign = null
+    root.designing = false
+    root.designingDesign = null
     if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
   }
 
@@ -743,12 +765,66 @@ Item {
 
   function customizeSelected() {
     if (!root.selectedDesign || !root.service) return
-    if (root.selectedDesign.path) { openEditor(root.selectedDesign); return }
+    if (root.selectedDesign.path) { editSelected(); return }
     root.service.customizeDesign(root.selectedDesign.id)
+  }
+
+  // A design of your own opens where it was made: the designer for a layout,
+  // the code editor for hand-written QML.
+  function editSelected() {
+    var d = root.selectedDesign
+    if (!d || !d.path) return
+    if (d.designer) root.openDesigner(d)
+    else root.openEditor(d)
   }
 
   function newDesign() {
     if (root.service) root.service.customizeDesign("new")
+  }
+
+  // A new visual design: the service writes the starter layout, and the
+  // designerDesignCreated signal below opens it.
+  function newDesignerDesign() {
+    if (!root.service) return
+    root.service.createDesignerDesign(Layout.generate(Layout.starterDoc("My Layout"), root.pluginId))
+  }
+
+  function openDesigner(design) {
+    if (!design || !design.path) return
+    root.designingDesign = design
+    root.designing = true
+    root.editing = false
+    root.fullPreview = false
+    // Re-read it: the same design may have been edited as code in between.
+    Qt.callLater(function() { designerView.load() })
+    // And hand it the keyboard once the card is really up. Asking on the same
+    // tick does not stick — the shortcuts then stay dead until the first click
+    // lands inside the designer.
+    designerFocusTimer.restart()
+  }
+
+  Timer {
+    id: designerFocusTimer
+    interval: 150
+    repeat: false
+    onTriggered: if (root.designing) designerView.focusCanvas()
+  }
+
+  function closeDesigner() {
+    root.designing = false
+    root.designingDesign = null
+    if (root.service && typeof root.service.rescanUserDesigns === "function") root.service.rescanUserDesigns()
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  // The Image piece needs the file dialog, which needs the keyboard. Save
+  // first, step aside, and come back into the same design.
+  function pickDesignerImage() {
+    if (!root.service) return
+    designerView.save()
+    root.designerPaused = true
+    root.dismiss()
+    root.service.pickImage(true)
   }
 
   function openEditor(design) {
@@ -786,6 +862,17 @@ Item {
         var d = Designs.byId(id)
         if (d) root.openEditor(d)
       })
+    }
+    function onDesignerDesignCreated(id, path) {
+      if (!root.opened) return
+      Qt.callLater(function() {
+        root.selectById(id)
+        var d = Designs.byId(id)
+        if (d) root.openDesigner(d)
+      })
+    }
+    function onImagePicked(path) {
+      designerView.fileFieldPicked(path)
     }
     function onClipDesignAdded(id) {
       root.mainTab = "animation"
@@ -859,11 +946,13 @@ Item {
       // Embedded lock previews can pull keyboard focus; reclaim it whenever
       // it drifts, except while a real editor field wants it.
       onActiveFocusChanged: {
-        if (!activeFocus && root.opened && root.bootEditing.length === 0 && !root.editing && !root.customDelayEditing)
+        if (!activeFocus && root.opened && root.bootEditing.length === 0 && !root.editing
+            && !root.designing && !root.customDelayEditing)
           Qt.callLater(function() { keyCatcher.forceActiveFocus() })
       }
       Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Escape) { root.handleEscape(); event.accepted = true; return }
+        if (root.designing) return
         if (root.editing) return
         if (root.bootEditing.length > 0) return
         if (root.customDelayEditing) return
@@ -879,8 +968,12 @@ Item {
         } else if (event.key === Qt.Key_C) {
           root.customizeSelected(); event.accepted = true
         } else if (event.key === Qt.Key_E) {
-          if (root.selectedDesign && root.selectedDesign.path) root.openEditor(root.selectedDesign)
+          if (root.selectedDesign && root.selectedDesign.path) root.editSelected()
           else root.customizeSelected()
+          event.accepted = true
+        } else if (event.key === Qt.Key_D) {
+          if (root.selectedDesign && root.selectedDesign.designer) root.openDesigner(root.selectedDesign)
+          else root.newDesignerDesign()
           event.accepted = true
         } else if (event.key === Qt.Key_N) {
           root.newDesign(); event.accepted = true
@@ -2486,6 +2579,38 @@ Item {
         }
       }
 
+      // "+ New design" at the top of the three: the visual designer, where a
+      // lock screen is put together by dragging pieces onto the screen.
+      Rectangle {
+        id: newDesignBtn
+        anchors.left: parent.left
+        anchors.leftMargin: card.contentLeftInset
+        anchors.bottom: newClipBtn.top
+        anchors.bottomMargin: Style.space(8)
+        width: root.sidebarW
+        height: Style.space(34)
+        color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, newDesignArea.containsMouse ? 0.28 : 0.14)
+        border.width: 1
+        border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.6)
+        Behavior on color { ColorAnimation { duration: 100 } }
+
+        Text {
+          anchors.centerIn: parent
+          text: "+ New design"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.weight: Font.DemiBold
+        }
+
+        MouseArea {
+          id: newDesignArea
+          anchors.fill: parent
+          hoverEnabled: true
+          onClicked: root.newDesignerDesign()
+        }
+      }
+
       // "+ New clip" above it: your own video as an unlock clip design.
       Rectangle {
         id: newClipBtn
@@ -2860,7 +2985,8 @@ Item {
                 Text {
                   id: custLabel
                   anchors.centerIn: parent
-                  text: cell.modelData.path ? "Edit  E" : "Customize  C"
+                  text: cell.modelData.designer ? "Design  E"
+                    : (cell.modelData.path ? "Edit  E" : "Customize  C")
                   color: "#ffffff"
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -2996,7 +3122,7 @@ Item {
             if (root.mainTab === "editor") return "Changes save automatically   ·   Esc: back"
             if (root.mainTab === "boot") return "Click a card to pick it   ·   Apply writes it to the boot image   ·   B / Esc: back"
             if (root.mainTab === "settings") return "U / Esc: back"
-            return "Arrows: browse   Tab: category   Space: preview   Enter: select   C: customize   E: edit   N: new   X: delete   A: avatar   V: video   S: unlock clip   U: unlock effect   B: boot screen   Esc: close"
+            return "Arrows: browse   Space: preview   Enter: select   D: designer   C: customize   E: edit   N: new   X: delete   A: avatar   V: video   S: unlock clip   U: unlock effect   B: boot screen   Esc: close"
           }
           color: root.muted
           font.family: root.fontFamily
@@ -3118,6 +3244,45 @@ Item {
           screenHeight: panel.height
           onCloseRequested: root.closeEditor()
           onOpenExternalRequested: function(path) { root.openExternal(path) }
+        }
+      }
+    }
+
+    BorderSurface {
+      id: designerCard
+      visible: root.designing
+      width: root.cardWidth
+      height: root.cardHeight
+      radius: root.cornerRadius
+      anchors.centerIn: parent
+      color: root.background
+      borderSpec: root.borderSpec
+
+      MouseArea { anchors.fill: parent; onClicked: {} }
+
+      Designer {
+        id: designerView
+        anchors.fill: parent
+        anchors.topMargin: designerCard.contentTopInset + root.contentMargin
+        anchors.bottomMargin: designerCard.contentBottomInset + root.contentMargin
+        anchors.leftMargin: designerCard.contentLeftInset + root.contentMargin
+        anchors.rightMargin: designerCard.contentRightInset + root.contentMargin
+        service: root.service
+        design: root.designing ? root.designingDesign : null
+        pluginId: root.pluginId
+        background: root.background
+        foreground: root.foreground
+        accent: root.accent
+        fontFamily: root.fontFamily
+        screenWidth: panel.width
+        screenHeight: panel.height
+        onCloseRequested: root.closeDesigner()
+        onUseRequested: if (root.service && root.designingDesign) root.service.setDesign(root.designingDesign.id)
+        onPickFileRequested: root.pickDesignerImage()
+        onOpenCodeRequested: function(path) {
+          // Straight from the canvas into the code, on the same file.
+          root.designing = false
+          root.openEditor(root.designingDesign)
         }
       }
     }
